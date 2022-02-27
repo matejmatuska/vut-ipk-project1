@@ -12,21 +12,43 @@
 #define LINE_LEN_MAX 4096
 #define HTTP_HEADER_MAX 2048
 
-#define HTTP_OK 200
-#define HTTP_NOT_FOUND 404
+#define CPU_LOAD_INTERVAL 500
 
-#define LOAD_INTERVAL 500
+enum http_status {
+    HTTP_OK = 200,
+    HTTP_NOT_FOUND = 404,
+    HTTP_METHOD_NOT_ALLOWED = 405,
+    HTTP_INTERNAL_SERVER_ERR = 500,
+};
+
+const char *http_status_to_str(enum http_status status)
+{
+    switch (status) {
+        case HTTP_OK:
+            return "OK";
+        case HTTP_NOT_FOUND:
+            return "Not Found";
+        case HTTP_METHOD_NOT_ALLOWED:
+            return "Method Not Allowed";
+        case HTTP_INTERNAL_SERVER_ERR:
+            return "Internal Server Error";
+        default:
+            return NULL;
+    }
+}
 
 int startswith(const char *prefix, const char *str)
 {
     return strncmp(prefix, str, strlen(prefix)) == 0;
 }
 
-int send_response(int sockfd, unsigned status, const char *status_msg, const char *body)
+int send_response(int sockfd, enum http_status status, const char *body)
 {
+    const char *status_msg = http_status_to_str(status);
+
     char buff[HTTP_HEADER_MAX];
     snprintf(buff, HTTP_HEADER_MAX,
-            "HTTP/1.1 %u %s\r\n"
+            "HTTP/1.1 %d %s\r\n"
             "Content-Type: text/plain\r\n"
             "Content-Length: %lu\r\n"
             "\r\n"
@@ -42,6 +64,7 @@ int send_response(int sockfd, unsigned status, const char *status_msg, const cha
 }
 
 // return socket fd or -1 in case of error
+// in case of error error message is printed
 int init_socket(char *port)
 {
     struct addrinfo hints;
@@ -55,7 +78,7 @@ int init_socket(char *port)
     if (ecode != 0)
     {
         fprintf(stderr, "Couldn't get address info: %s\n", gai_strerror(ecode));
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -86,6 +109,31 @@ int init_socket(char *port)
     return sockfd;
 }
 
+int get_cpu_name(char *dest)
+{
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f)
+        return 0;
+
+    char line[LINE_LEN_MAX];
+    int found = 0;
+    while (fgets(line, LINE_LEN_MAX, f) && !found)
+    {
+        if (startswith("model name", line))
+        {
+            char *name = strchr(line, ':') + 1;
+            if (name)
+            {
+                strncpy(dest, name, strlen(name) - 1);
+                found = 1;
+            }
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+// return cpu load or -1 in case of error
 double get_cpu_load()
 {
     FILE *f;
@@ -99,20 +147,20 @@ double get_cpu_load()
     fscanf(f, "cpu %d %d %d %d %d %d %d %d",
             &puser, &pnice, &psystem, &pidle,
             &piowait, &pirq, &psoftirq, &psteal);
+    fclose(f);
 
-    struct timespec ts = { 
-        .tv_sec = LOAD_INTERVAL / 1000,
-        .tv_nsec = (LOAD_INTERVAL % 1000) * 1000000
+    struct timespec ts = {
+        .tv_sec = CPU_LOAD_INTERVAL / 1000,
+        .tv_nsec = (CPU_LOAD_INTERVAL % 1000) * 1000000
     };
     nanosleep(&ts, NULL);
-    fclose(f);
 
     if ((f = fopen("/proc/stat", "rb")) == NULL)
     {
         perror("hinfosvc: ");
         return -1;
     }
-    int user, nice, system, idle, iowait, irq, softirq, steal; 
+    int user, nice, system, idle, iowait, irq, softirq, steal;
     fscanf(f, "cpu %d %d %d %d %d %d %d %d",
             &user, &nice, &system, &idle,
             &iowait, &irq, &softirq, &steal);
@@ -129,17 +177,15 @@ double get_cpu_load()
 
     double totald = total - ptotal;
     double idled = idle - pidle;
-    return (totald - idled)/totald * 100;
+    return (totald - idled) / totald * 100;
 }
 
-// error codes:
-// 1 if 
-int handle_request(int sockfd, char *method, char *path)
+void handle_request(int sockfd, char *method, char *path)
 {
     if (strcmp("GET", method) != 0)
     {
-        send_response(sockfd, HTTP_NOT_FOUND, "Not Found", "404 Not Found");
-        close(sockfd);
+        send_response(sockfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        return;
     }
 
     if (strcmp("/hostname", path) == 0)
@@ -147,47 +193,37 @@ int handle_request(int sockfd, char *method, char *path)
         char hostname[HOST_NAME_MAX + 1];
         if (gethostname(hostname, HOST_NAME_MAX + 1) == -1)
         {
-            perror("hinfosvc: ");
-            // TODO what to do
+            char *message = "Failed to retrieve hostname";
+            send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, message);
+            return;
         }
-        send_response(sockfd, HTTP_OK, "OK", hostname);
+        send_response(sockfd, HTTP_OK, hostname);
     }
     else if (strcmp("/cpu-name", path) == 0)
     {
-        FILE *f = fopen("/proc/cpuinfo", "r");
-        if (!f)
-        {
-            perror("hinfosvvc: ");
-            close(sockfd);
-            return 1;
-        }
-
-        char line[LINE_LEN_MAX];
-        char *cpu_name = "Failed to retrieve CPU name";
-        while (fgets(line, LINE_LEN_MAX, f))
-        {
-            if (startswith("model name", line))
-            {
-                cpu_name = strchr(line, ':') + 1;
-                break;
-            }
-        }
-        fclose(f);
-        send_response(sockfd, HTTP_OK, "OK", cpu_name);
+        char cpu_name[LINE_LEN_MAX];
+        if (get_cpu_name(cpu_name))
+            send_response(sockfd, HTTP_OK, cpu_name);
+        else
+            send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, "Failed to retrieve CPU name");
     }
     else if (strcmp("/load", path) == 0)
     {
         double load = get_cpu_load();
+        if (load == -1.0)
+        {
+            char *message = "Failed to retrieve CPU load";
+            send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, message);
+            return;
+        }
         char body[5];
         snprintf(body, 5, "%d%%", (int) load);
-        send_response(sockfd, HTTP_OK, "OK", body);
+        send_response(sockfd, HTTP_OK, body);
     }
     else
     {
-        send_response(sockfd, HTTP_NOT_FOUND, "Not Found", "404 Not Found");
+        send_response(sockfd, HTTP_NOT_FOUND, "404 Not Found");
     }
-
-    return 0;
 }
 
 int main(int argc, char *argv[])
@@ -198,19 +234,36 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    int sockfd = init_socket(argv[1]);
-    if (sockfd == -1)
+    char *rest;
+    int port = strtol(argv[1], &rest, 10);
+    if (*rest != '\0')
+    {
+        fprintf(stderr, "Port must be an integer\n");
         return EXIT_FAILURE;
+    }
+
+    if (port < 0 || port > 65535)
+    {
+        fprintf(stderr, "Invalid port number: %d", port);
+        return EXIT_FAILURE;
+    }
+
+    int listenfd = init_socket(argv[1]);
+    if (listenfd == -1)
+    {
+        // message is printed inside function
+        return EXIT_FAILURE;
+    }
 
     while (1)
     {
         // we do not care about who is the client so pass in NULLs
-        int fd = accept(sockfd, NULL, NULL); 
+        int fd = accept(listenfd, NULL, NULL);
         if (fd == -1)
         {
             perror("hinfosvc: ");
-            close(sockfd);
-            exit(EXIT_FAILURE);
+            // Non-fatal error, we can continue receiving requests
+            continue;
         }
 
         char buff[HTTP_HEADER_MAX];
@@ -218,6 +271,7 @@ int main(int argc, char *argv[])
         {
             perror("hinfosvc: ");
             // Non-fatal error, we can continue receiving requests
+            continue;
         }
 
         char *method = strtok(buff, " ");
@@ -227,6 +281,7 @@ int main(int argc, char *argv[])
         close(fd);
     }
 
-    close(sockfd);
+    // practicaly unreachable
+    close(listenfd);
     return EXIT_SUCCESS;
 }
