@@ -1,16 +1,19 @@
-CFLAGS= -Wall -Wextra
+CFLAGS=-Wall -Wextra
 
 TARGET=hinfosvc
 
-hinfosvc: hinfosvc.c
+ARCHIVER=zip
+ARCHIVE=xmatus36.zip
+
+all: $(TARGET)
 
 run: $(TARGET)
-	./$(TARGET) 8080
+	./$< 8080
 
-pack: $(TARGET)
-	zip xmatus36.zip $^
+pack: hinfosvc.c readme.md Makefile
+	$(ARCHIVER) $(ARCHIVE) $^
 
 clean:
 	-rm -f $(TARGET)
 
-.PHONY: run pack clean
+.PHONY: all run pack clean

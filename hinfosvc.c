@@ -1,13 +1,14 @@
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <time.h>
 
-#include <limits.h>
-#include <unistd.h>
+#include <netdb.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <netdb.h>
+#include <unistd.h>
 
 #define LINE_LEN_MAX 4096
 #define HTTP_HEADER_MAX 2048
@@ -74,41 +75,42 @@ int init_socket(char *port)
     hints.ai_flags = AI_PASSIVE;
 
     struct addrinfo *res;
-    int ecode = getaddrinfo(NULL, port, &hints, &res) != 0;
-    if (ecode != 0)
+    int err = getaddrinfo(NULL, port, &hints, &res);
+    if (err != 0)
     {
-        fprintf(stderr, "Couldn't get address info: %s\n", gai_strerror(ecode));
+        fprintf(stderr, "Couldn't get address info: %s\n", gai_strerror(err));
         return -1;
     }
 
-    int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd == -1)
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd == -1)
     {
         perror("hinfosvc: ");
         freeaddrinfo(res);
         return -1;
     }
 
-    if (bind(sockfd, res->ai_addr, res->ai_addrlen) == -1)
+    if (bind(fd, res->ai_addr, res->ai_addrlen) == -1)
     {
         perror("hinfosvc: ");
         freeaddrinfo(res);
-        close(sockfd);
+        close(fd);
         return -1;
     }
 
     freeaddrinfo(res);
 
-    if (listen(sockfd, 10) == -1)
+    if (listen(fd, 10) == -1)
     {
         perror("hinfosvc: ");
-        close(sockfd);
+        close(fd);
         return -1;
     }
 
-    return sockfd;
+    return fd;
 }
 
+// return false in case of error, otherwise true
 int get_cpu_name(char *dest)
 {
     FILE *f = fopen("/proc/cpuinfo", "r");
@@ -124,6 +126,7 @@ int get_cpu_name(char *dest)
             char *name = strchr(line, ':') + 1;
             if (name)
             {
+                // length is 100% at least 1
                 strncpy(dest, name, strlen(name) - 1);
                 found = 1;
             }
@@ -226,6 +229,16 @@ void handle_request(int sockfd, char *method, char *path)
     }
 }
 
+static int welcome_fd = -1;
+void handle_sigint(int signum)
+{
+    (void) signum;
+    // TODO maybe close the accept socket too
+    if (welcome_fd != -1)
+        close(welcome_fd);
+    exit(EXIT_SUCCESS);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc != 2)
@@ -248,18 +261,20 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    int listenfd = init_socket(argv[1]);
-    if (listenfd == -1)
+    welcome_fd = init_socket(argv[1]);
+    if (welcome_fd == -1)
     {
         // message is printed inside function
         return EXIT_FAILURE;
     }
 
+    // TODO sigaction instead of signal?
+    signal(SIGINT, handle_sigint);
     while (1)
     {
         // we do not care about who is the client so pass in NULLs
-        int fd = accept(listenfd, NULL, NULL);
-        if (fd == -1)
+        int con_fd = accept(welcome_fd, NULL, NULL);
+        if (con_fd == -1)
         {
             perror("hinfosvc: ");
             // Non-fatal error, we can continue receiving requests
@@ -267,7 +282,7 @@ int main(int argc, char *argv[])
         }
 
         char buff[HTTP_HEADER_MAX];
-        if (recv(fd, buff, sizeof(buff), 0) == -1)
+        if (recv(con_fd, buff, sizeof(buff), 0) == -1)
         {
             perror("hinfosvc: ");
             // Non-fatal error, we can continue receiving requests
@@ -276,12 +291,12 @@ int main(int argc, char *argv[])
 
         char *method = strtok(buff, " ");
         char *path = strtok(NULL, " ");
+        handle_request(con_fd, method, path);
 
-        handle_request(fd, method, path);
-        close(fd);
+        close(con_fd);
     }
 
     // practicaly unreachable
-    close(listenfd);
+    close(welcome_fd);
     return EXIT_SUCCESS;
 }
