@@ -66,7 +66,7 @@ int send_response(int sockfd, enum http_status status, const char *body)
 
 // return socket fd or -1 in case of error
 // in case of error error message is printed
-int init_socket(char *port)
+int init_socket(const char *port)
 {
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -89,6 +89,13 @@ int init_socket(char *port)
         freeaddrinfo(res);
         return -1;
     }
+
+#ifdef DEBUG
+    int enable = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
+        // non-fatal error
+        perror("hinfosvc setsockopt(REUSEADDR) failed: ");
+#endif
 
     if (bind(fd, res->ai_addr, res->ai_addrlen) == -1)
     {
@@ -126,7 +133,7 @@ int get_cpu_name(char *dest)
             char *name = strchr(line, ':') + 1;
             if (name)
             {
-                // length is 100% at least 1
+                // length is 100% at > 0
                 strncpy(dest, name, strlen(name) - 1);
                 found = 1;
             }
@@ -183,7 +190,7 @@ double get_cpu_load()
     return (totald - idled) / totald * 100;
 }
 
-void handle_request(int sockfd, char *method, char *path)
+void handle_request(int sockfd, const char *method, const char *path)
 {
     if (strcmp("GET", method) != 0)
     {
@@ -233,7 +240,6 @@ static int welcome_fd = -1;
 void handle_sigint(int signum)
 {
     (void) signum;
-    // TODO maybe close the accept socket too
     if (welcome_fd != -1)
         close(welcome_fd);
     exit(EXIT_SUCCESS);
@@ -268,8 +274,12 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // TODO sigaction instead of signal?
-    signal(SIGINT, handle_sigint);
+    struct sigaction act;
+    act.sa_handler = handle_sigint,
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    sigaction(SIGINT, &act, NULL);
+
     while (1)
     {
         // we do not care about who is the client so pass in NULLs
@@ -289,8 +299,8 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        char *method = strtok(buff, " ");
-        char *path = strtok(NULL, " ");
+        const char *method = strtok(buff, " ");
+        const char *path = strtok(NULL, " ");
         handle_request(con_fd, method, path);
 
         close(con_fd);
