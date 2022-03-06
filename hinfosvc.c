@@ -14,6 +14,7 @@
 #define HTTP_HEADER_MAX 2048
 
 #define CPU_LOAD_INTERVAL 500
+#define LISTEN_BACKLOG 10
 
 enum http_status {
     HTTP_OK = 200,
@@ -50,6 +51,7 @@ int send_response(int sockfd, enum http_status status, const char *body)
     char buff[HTTP_HEADER_MAX];
     snprintf(buff, HTTP_HEADER_MAX,
             "HTTP/1.1 %d %s\r\n"
+            "Allow: GET\r\n"
             "Content-Type: text/plain\r\n"
             "Content-Length: %lu\r\n"
             "\r\n"
@@ -107,7 +109,7 @@ int init_socket(const char *port)
 
     freeaddrinfo(res);
 
-    if (listen(fd, 10) == -1)
+    if (listen(fd, LISTEN_BACKLOG) == -1)
     {
         perror("hinfosvc: ");
         close(fd);
@@ -130,7 +132,7 @@ int get_cpu_name(char *dest)
     {
         if (startswith("model name", line))
         {
-            char *name = strchr(line, ':') + 1;
+            char *name = strchr(line, ':') + 2;
             if (name)
             {
                 // length is 100% at > 0
