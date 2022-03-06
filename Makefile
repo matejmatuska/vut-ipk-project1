@@ -1,19 +1,23 @@
 CFLAGS=-Wall -Wextra
+DEBUG_FLAGS=-g -DDEBUG
 
-TARGET=hinfosvc
+BIN=hinfosvc
 
 ARCHIVER=zip
 ARCHIVE=xmatus36.zip
 
-all: $(TARGET)
+all: $(BIN)
 
-run: $(TARGET)
+run: $(BIN)
 	./$< 8080
 
-pack: hinfosvc.c readme.md Makefile
+debug: hinfosvc.c
+	$(CC) $^ $(DEBUG_FLAGS) -o $(BIN)
+
+pack: hinfosvc.c Readme.md Makefile
 	$(ARCHIVER) $(ARCHIVE) $^
 
 clean:
-	-rm -f $(TARGET)
+	-rm -f $(BIN)
 
-.PHONY: all run pack clean
+.PHONY: all run debug pack clean
