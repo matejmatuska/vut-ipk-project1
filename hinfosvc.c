@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <limits.h>
+#include <limits.h> // for HOST_NAME_MAX
 #include <time.h>
 
 #include <netdb.h>
@@ -12,12 +12,14 @@
 
 #define LINE_LEN_MAX 4096
 #define HTTP_HEADER_MAX 2048
+#define REQUEST_BUFSIZ 1024
 
 #define CPU_LOAD_INTERVAL 500
 #define LISTEN_BACKLOG 10
 
 enum http_status {
     HTTP_OK = 200,
+    HTTP_BAD_REQUEST = 400,
     HTTP_NOT_FOUND = 404,
     HTTP_METHOD_NOT_ALLOWED = 405,
     HTTP_INTERNAL_SERVER_ERR = 500,
@@ -28,6 +30,8 @@ const char *http_status_to_str(enum http_status status)
     switch (status) {
         case HTTP_OK:
             return "OK";
+        case HTTP_BAD_REQUEST:
+            return "Bad Request";
         case HTTP_NOT_FOUND:
             return "Not Found";
         case HTTP_METHOD_NOT_ALLOWED:
@@ -54,11 +58,12 @@ int send_response(int sockfd, enum http_status status, const char *body)
             "Allow: GET\r\n"
             "Content-Type: text/plain\r\n"
             "Content-Length: %lu\r\n"
-            "\r\n"
-            "%s",
-            status, status_msg, strlen(body), body);
+            "\r\n",
+            status, status_msg, strlen(body));
 
-    if (send(sockfd, buff, HTTP_HEADER_MAX, 0) == -1)
+    strcat(buff, body);
+
+    if (send(sockfd, buff, strlen(buff), 0) == -1)
     {
         perror("hinfosvc: ");
         return 0;
@@ -115,7 +120,6 @@ int init_socket(const char *port)
         close(fd);
         return -1;
     }
-
     return fd;
 }
 
@@ -205,7 +209,7 @@ void handle_request(int sockfd, const char *method, const char *path)
         char hostname[HOST_NAME_MAX + 1];
         if (gethostname(hostname, HOST_NAME_MAX + 1) == -1)
         {
-            char *message = "Failed to retrieve hostname";
+            const char *message = "Failed to retrieve hostname";
             send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, message);
             return;
         }
@@ -215,21 +219,26 @@ void handle_request(int sockfd, const char *method, const char *path)
     {
         char cpu_name[LINE_LEN_MAX];
         if (get_cpu_name(cpu_name))
+        {
             send_response(sockfd, HTTP_OK, cpu_name);
+        }
         else
-            send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, "Failed to retrieve CPU name");
+        {
+            const char *message = "Failed to retrieve CPU name";
+            send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, message);
+        }
     }
     else if (strcmp("/load", path) == 0)
     {
         double load = get_cpu_load();
         if (load == -1.0)
         {
-            char *message = "Failed to retrieve CPU load";
+            const char *message = "Failed to retrieve CPU load";
             send_response(sockfd, HTTP_INTERNAL_SERVER_ERR, message);
             return;
         }
-        char body[5];
-        snprintf(body, 5, "%d%%", (int) load);
+        char body[8];
+        snprintf(body, 8, "%.2f%%", load);
         send_response(sockfd, HTTP_OK, body);
     }
     else
@@ -293,7 +302,7 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        char buff[HTTP_HEADER_MAX];
+        char buff[REQUEST_BUFSIZ] = { 0 };
         if (recv(con_fd, buff, sizeof(buff), 0) == -1)
         {
             perror("hinfosvc: ");
@@ -301,9 +310,17 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        const char *method = strtok(buff, " ");
-        const char *path = strtok(NULL, " ");
-        handle_request(con_fd, method, path);
+        char *method = strtok(buff, " ");
+        fprintf(stderr, "method: %s\n", method);
+        char *path = strtok(NULL, " ");
+        fprintf(stderr, "path: %s\n", path);
+        char *version = strtok(NULL, " \n");
+        fprintf(stderr, "version: %s\n", version);
+
+        if (!method || !path || !version)
+            send_response(con_fd, HTTP_BAD_REQUEST, "Bad Request");
+        else
+            handle_request(con_fd, method, path);
 
         close(con_fd);
     }
